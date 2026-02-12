@@ -1,0 +1,10 @@
+services:
+  medical-tourism-app:
+    build: .
+    ports:
+      - "5050:5050"
+    env_file:
+      - .env
+    # This ensures that even if they haven't created the .env yet,
+    # the container won't crash immediately on startup.
+    restart: always
