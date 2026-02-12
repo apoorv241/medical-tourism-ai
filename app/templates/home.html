@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Medical Tourism AI</title>
+
+    <!-- Bootstrap CSS (CDN) -->
+    <link
+      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+      rel="stylesheet"
+    />
+
+    <style>
+      .msg-user {
+        padding: 12px;
+        background: #f8f9fa;
+        border: 1px solid #dee2e6;
+        border-radius: 10px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+
+      /* Assistant auto-grows by default */
+      .msg-assistant {
+        padding: 14px;
+        background: #ffffff;
+        border: 1px solid #dee2e6;
+        border-radius: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
+        overflow: visible; /* default: no scroll */
+      }
+
+      /* Only applied when response is long */
+      .assistant-scroll {
+        max-height: 420px;
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+
+  <body class="bg-light">
+    <div class="container py-5">
+      <h1 class="mb-4">Agentic Medical Tourism Search</h1>
+
+      <!-- Conversation log -->
+      <div id="history"></div>
+
+      <!-- Input -->
+      <div class="input-group mb-3">
+        <input id="query" class="form-control" placeholder="" />
+        <button class="btn btn-primary" onclick="submitQuery()">Search</button>
+      </div>
+    </div>
+
+    <!-- Bootstrap JS -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+
+    <script>
+      function wordCount(text) {
+        const words = (text || "").trim().match(/\S+/g);
+        return words ? words.length : 0;
+      }
+
+      function applyAssistantScroll(el, text, threshold = 300) {
+        if (wordCount(text) > threshold) el.classList.add("assistant-scroll");
+        else el.classList.remove("assistant-scroll");
+      }
+
+      function getLastAssistantText(data) {
+        // Prefer clarification_question if present
+        if (data && typeof data.clarification_question === "string" && data.clarification_question.trim()) {
+          return data.clarification_question.trim();
+        }
+
+        // Otherwise, pull from messages
+        const msgs = data?.messages;
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (m && (m.role === "assistant" || m.type === "ai") && typeof m.content === "string") {
+              const t = m.content.trim();
+              if (t) return t;
+            }
+          }
+          // fallback: last message content if it exists
+          const last = msgs[msgs.length - 1];
+          if (last && typeof last.content === "string" && last.content.trim()) return last.content.trim();
+        }
+
+        // If everything fails, stringify the payload so you see something useful
+        return JSON.stringify(data, null, 2);
+      }
+
+      async function submitQuery() {
+        const input = document.getElementById("query");
+        const q = input.value.trim();
+        if (!q) return;
+
+        const history = document.getElementById("history");
+
+        // ---- User block ----
+        const userBlock = document.createElement("pre");
+        userBlock.className = "msg-user mb-2";
+        userBlock.textContent = "You: " + q;
+        history.appendChild(userBlock);
+
+        // ---- Assistant block ----
+        const responseBlock = document.createElement("pre");
+        responseBlock.className = "msg-assistant mb-4";
+        responseBlock.textContent = "Searching...";
+        history.appendChild(responseBlock);
+
+        input.value = "";
+
+        try {
+          const res = await fetch("/api/plan", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ query: q }),
+          });
+
+          const data = await res.json();
+
+          const text = getLastAssistantText(data);
+          responseBlock.textContent = text;
+          applyAssistantScroll(responseBlock, text);
+        } catch (err) {
+          responseBlock.textContent = "Error contacting server.";
+        }
+
+        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+      }
+    </script>
+  </body>
+</html>
