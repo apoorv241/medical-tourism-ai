@@ -1,19 +1,57 @@
+import os
+from urllib.parse import quote_plus
 from flask import Flask
-
-from app.agents.clinical_agent import ClinicalScopeSafetyAgent
-from app.agents.laguage_graph_detector import LanguageGraphDetector
-from app.core.llm import create_llm
-from app.routes import main, init_routes
+from dotenv import load_dotenv
+from flask import Blueprint, render_template, request, jsonify, redirect, url_for, flash
+from .extensions import db, login_manager
 
 
 def create_app():
+    load_dotenv()
+
     app = Flask(__name__)
+    app.config["SECRET_KEY"] = os.getenv("SECRET_KEY", "dev-secret")
+
+    db_user = os.getenv("DB_USER")
+    db_pass = quote_plus(os.getenv("DB_PASSWORD", ""))
+    db_host = os.getenv("DB_HOST", "mysql")
+    db_port = os.getenv("DB_PORT", "3306")
+    db_name = os.getenv("DB_NAME")
+
+    app.config["SQLALCHEMY_DATABASE_URI"] = (
+        f"mysql+pymysql://{db_user}:{db_pass}@{db_host}:{db_port}/{db_name}"
+    )
+    app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
+
+    # ✅ init extensions FIRST
+    db.init_app(app)
+    login_manager.init_app(app)
+    
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        flash("Please login.", "warning")
+        return redirect(url_for("main.home"))
+
+    # ✅ import models AFTER db init to avoid circular import
+    from .models import User
+
+    @login_manager.user_loader
+    def load_user(user_id: str):
+        return db.session.get(User, int(user_id))
+
+    # ✅ import routes/blueprints AFTER extensions are ready
+    from .routes import main, init_routes
+    app.register_blueprint(main)
+
+    # if you need to init your agents:
+    from app.agents.clinical_agent import ClinicalScopeSafetyAgent
+    from app.agents.laguage_graph_detector import LanguageGraphDetector
+    from app.core.llm import create_llm
 
     llm = create_llm()
     language_agent = LanguageGraphDetector(llm=llm)
     clinical_agent = ClinicalScopeSafetyAgent(llm=llm)
 
     init_routes(language_agent, clinical_agent)
-    app.register_blueprint(main)
 
     return app

@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Planner | Medical Tourism AI{% endblock %}
+
+{% block head_extra %}
+<style>
+  .msg-user {
+    padding: 12px;
+    background: #f8f9fa;
+    border: 1px solid #dee2e6;
+    border-radius: 10px;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+
+  .msg-assistant {
+    padding: 14px;
+    background: #ffffff;
+    border: 1px solid #dee2e6;
+    border-radius: 12px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow: visible;
+  }
+
+  .assistant-scroll {
+    max-height: 420px;
+    overflow-y: auto;
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<h1 class="mb-4 text-center">Agentic Medical Tourism Search</h1>
+
+<div id="history"></div>
+
+<div class="input-group mb-3">
+  <input id="query" class="form-control" placeholder="Ask about procedures, costs, countries..." />
+  <button class="btn btn-primary" onclick="submitQuery()">Search</button>
+</div>
+{% endblock %}
+
+{% block body_extra %}
+<script>
+  function wordCount(text) {
+    const words = (text || "").trim().match(/\S+/g);
+    return words ? words.length : 0;
+  }
+
+  function applyAssistantScroll(el, text, threshold = 300) {
+    if (wordCount(text) > threshold) el.classList.add("assistant-scroll");
+    else el.classList.remove("assistant-scroll");
+  }
+
+  function getLastAssistantText(data) {
+    if (data && typeof data.clarification_question === "string" && data.clarification_question.trim()) {
+      return data.clarification_question.trim();
+    }
+
+    const msgs = data?.messages;
+    if (Array.isArray(msgs) && msgs.length > 0) {
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m && (m.role === "assistant" || m.type === "ai") && typeof m.content === "string") {
+          const t = m.content.trim();
+          if (t) return t;
+        }
+      }
+      const last = msgs[msgs.length - 1];
+      if (last && typeof last.content === "string" && last.content.trim()) return last.content.trim();
+    }
+
+    return JSON.stringify(data, null, 2);
+  }
+
+  async function submitQuery() {
+    const input = document.getElementById("query");
+    const q = input.value.trim();
+    if (!q) return;
+
+    const history = document.getElementById("history");
+
+    const userBlock = document.createElement("pre");
+    userBlock.className = "msg-user mb-2";
+    userBlock.textContent = "You: " + q;
+    history.appendChild(userBlock);
+
+    const responseBlock = document.createElement("pre");
+    responseBlock.className = "msg-assistant mb-4";
+    responseBlock.textContent = "Searching...";
+    history.appendChild(responseBlock);
+
+    input.value = "";
+
+    try {
+      const res = await fetch("/api/plan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: q }),
+      });
+
+      const data = await res.json();
+      const text = getLastAssistantText(data);
+      responseBlock.textContent = text;
+      applyAssistantScroll(responseBlock, text);
+    } catch (err) {
+      responseBlock.textContent = "Error contacting server.";
+    }
+
+    window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
+  }
+</script>
+{% endblock %}

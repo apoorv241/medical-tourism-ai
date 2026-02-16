@@ -1,137 +1,126 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Medical Tourism AI</title>
+<head>
+    <meta charset="UTF-8">
+    <title>AI Medical Tourism Planner</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
 
-    <!-- Bootstrap CSS (CDN) -->
-    <link
-      href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
-      rel="stylesheet"
-    />
+    <!-- Bootstrap 5 CDN -->
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
+    <!-- Google Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600;700&display=swap" rel="stylesheet">
 
     <style>
-      .msg-user {
-        padding: 12px;
-        background: #f8f9fa;
-        border: 1px solid #dee2e6;
-        border-radius: 10px;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
+        body {
+            font-family: 'Poppins', sans-serif;
+            background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
 
-      /* Assistant auto-grows by default */
-      .msg-assistant {
-        padding: 14px;
-        background: #ffffff;
-        border: 1px solid #dee2e6;
-        border-radius: 12px;
-        white-space: pre-wrap;
-        word-break: break-word;
-        overflow: visible; /* default: no scroll */
-      }
+        .banner-title {
+            font-size: 2.8rem;
+            font-weight: 700;
+            color: white;
+        }
 
-      /* Only applied when response is long */
-      .assistant-scroll {
-        max-height: 420px;
-        overflow-y: auto;
-      }
+        .banner-subtitle {
+            color: #dcdcdc;
+            font-weight: 300;
+        }
+
+        .login-card {
+            border-radius: 15px;
+            backdrop-filter: blur(10px);
+            background: rgba(255, 255, 255, 0.95);
+            transition: 0.3s ease;
+        }
+
+        .login-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .btn-primary {
+            background: #2c5364;
+            border: none;
+        }
+
+        .btn-primary:hover {
+            background: #1c3d4a;
+        }
+
+        .alert {
+            border-radius: 10px;
+        }
     </style>
-  </head>
+</head>
+<body>
 
-  <body class="bg-light">
-    <div class="container py-5">
-      <h1 class="mb-4">Agentic Medical Tourism Search</h1>
-
-      <!-- Conversation log -->
-      <div id="history"></div>
-
-      <!-- Input -->
-      <div class="input-group mb-3">
-        <input id="query" class="form-control" placeholder="" />
-        <button class="btn btn-primary" onclick="submitQuery()">Search</button>
-      </div>
+<div class="container text-center">
+    
+    <!-- Banner -->
+    <div class="mb-5">
+        <h1 class="banner-title">AI Medical Tourism Planner</h1>
+        <p class="banner-subtitle">
+            Plan your global healthcare journey with intelligent AI guidance
+        </p>
     </div>
 
-    <!-- Bootstrap JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+      {% if messages %}
+        {% for category, message in messages %}
+          <div class="alert alert-{{ category }} alert-dismissible fade show mx-auto shadow-sm"
+               style="max-width: 500px;"
+               role="alert">
+            {{ message }}
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        {% endfor %}
+      {% endif %}
+    {% endwith %}
 
-    <script>
-      function wordCount(text) {
-        const words = (text || "").trim().match(/\S+/g);
-        return words ? words.length : 0;
-      }
+    <!-- Login Card -->
+    <div class="row justify-content-center">
+        <div class="col-md-5">
+            <div class="card shadow-lg login-card p-4">
+                <h4 class="mb-4 fw-semibold">Login</h4>
 
-      function applyAssistantScroll(el, text, threshold = 300) {
-        if (wordCount(text) > threshold) el.classList.add("assistant-scroll");
-        else el.classList.remove("assistant-scroll");
-      }
+                <form method="POST" action="/login">
+                    <div class="mb-3 text-start">
+                        <label class="form-label">Email address</label>
+                        <input type="email" name="email" class="form-control" placeholder="Enter email" required>
+                    </div>
 
-      function getLastAssistantText(data) {
-        // Prefer clarification_question if present
-        if (data && typeof data.clarification_question === "string" && data.clarification_question.trim()) {
-          return data.clarification_question.trim();
-        }
+                    <div class="mb-3 text-start">
+                        <label class="form-label">Password</label>
+                        <input type="password" name="password" class="form-control" placeholder="Enter password" required>
+                    </div>
 
-        // Otherwise, pull from messages
-        const msgs = data?.messages;
-        if (Array.isArray(msgs) && msgs.length > 0) {
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i];
-            if (m && (m.role === "assistant" || m.type === "ai") && typeof m.content === "string") {
-              const t = m.content.trim();
-              if (t) return t;
-            }
-          }
-          // fallback: last message content if it exists
-          const last = msgs[msgs.length - 1];
-          if (last && typeof last.content === "string" && last.content.trim()) return last.content.trim();
-        }
+                    <div class="d-grid gap-2 mt-3">
+                        <button type="submit" class="btn btn-primary">
+                            Login
+                        </button>
 
-        // If everything fails, stringify the payload so you see something useful
-        return JSON.stringify(data, null, 2);
-      }
+                        <button type="button"
+                                class="btn btn-outline-secondary"
+                                onclick="window.location.href='/register'">
+                            Sign Up
+                        </button>
+                    </div>
+                </form>
 
-      async function submitQuery() {
-        const input = document.getElementById("query");
-        const q = input.value.trim();
-        if (!q) return;
+            </div>
+        </div>
+    </div>
 
-        const history = document.getElementById("history");
+</div>
 
-        // ---- User block ----
-        const userBlock = document.createElement("pre");
-        userBlock.className = "msg-user mb-2";
-        userBlock.textContent = "You: " + q;
-        history.appendChild(userBlock);
+<!-- Bootstrap JS -->
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 
-        // ---- Assistant block ----
-        const responseBlock = document.createElement("pre");
-        responseBlock.className = "msg-assistant mb-4";
-        responseBlock.textContent = "Searching...";
-        history.appendChild(responseBlock);
-
-        input.value = "";
-
-        try {
-          const res = await fetch("/api/plan", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ query: q }),
-          });
-
-          const data = await res.json();
-
-          const text = getLastAssistantText(data);
-          responseBlock.textContent = text;
-          applyAssistantScroll(responseBlock, text);
-        } catch (err) {
-          responseBlock.textContent = "Error contacting server.";
-        }
-
-        window.scrollTo({ top: document.body.scrollHeight, behavior: "smooth" });
-      }
-    </script>
-  </body>
+</body>
 </html>

@@ -4,7 +4,28 @@ services:
     ports:
       - "5050:5050"
     env_file:
-      - .env
-    # This ensures that even if they haven't created the .env yet,
-    # the container won't crash immediately on startup.
+      - ./.env
+    depends_on:
+      mysql:
+        condition: service_healthy
     restart: always
+
+  mysql:
+    image: mysql:8.0
+    env_file:
+      - ./.env
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+volumes:
+  mysql_data:
