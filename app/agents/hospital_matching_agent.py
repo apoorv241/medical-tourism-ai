@@ -7,64 +7,13 @@ from typing_extensions import TypedDict, Annotated
 from langgraph.graph import StateGraph, START, END
 from langgraph.graph.message import add_messages
 from langgraph.checkpoint.memory import MemorySaver
+from langgraph.prebuilt import ToolNode, tools_condition
 
-from langchain_core.tools import tool
+from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
+from app.tools.hospital_tools import search_hospitals_tool, pick_best_hospitals_tool
 
-# -------------------------
-# Tools (STUBS) - Replace internals with real API calls later
-# -------------------------
-
-@tool
-def search_hospitals_tool(procedure: str, city: str, country: str) -> Dict[str, Any]:
-    """
-    Return a shortlist of hospitals/clinics relevant to a procedure.
-    Replace stub with: Google Places / government registry / accreditation directory API.
-    """
-    # STUB response
-    return {
-        "query": {"procedure": procedure, "city": city, "country": country},
-        "results": [
-            {
-                "name": "Example Eye Hospital",
-                "address": f"{city}, {country}",
-                "rating": 4.6,
-                "approx_price_usd": 1800,
-                "why": "High ratings + specializes in LASIK",
-            },
-            {
-                "name": "Example Multispecialty Clinic",
-                "address": f"{city}, {country}",
-                "rating": 4.4,
-                "approx_price_usd": 1600,
-                "why": "Good outcomes + shorter wait times",
-            },
-        ],
-    }
-
-
-@tool
-def pick_best_hospitals_tool(hospitals: List[Dict[str, Any]], budget_max: Optional[float]) -> Dict[str, Any]:
-    """
-    Rank hospitals by price-fit + rating. Replace with your own scoring logic.
-    """
-    if not hospitals:
-        return {"ranked": []}
-
-    ranked = sorted(
-        hospitals,
-        key=lambda x: (
-            0 if (budget_max is None or (x.get("approx_price_usd") or 10**9) <= budget_max) else 1,
-            -(x.get("rating") or 0),
-        ),
-    )
-    return {"ranked": ranked[:5]}
-
-
-# -------------------------
-# LangGraph State
-# -------------------------
 
 class HospitalMatchState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
@@ -79,12 +28,14 @@ class HospitalMatchState(TypedDict, total=False):
 
 class HospitalMatchingAgent:
     """
-    Inputs: constraints { procedure, destination (country/city), budget }
-    Output: ranked hospitals + optional clarification if missing destination city, etc.
+    LLM decides which tools to call.
+    Inputs: constraints (from language agent)
+    Output: hospitals_ranked OR clarification_question
     """
 
     def __init__(self, llm):
-        self.llm = llm
+        self.tools = [search_hospitals_tool, pick_best_hospitals_tool]
+        self.llm = llm.bind_tools(self.tools) 
         self.checkpointer = MemorySaver()
         self.graph = self._build()
 
@@ -103,88 +54,121 @@ class HospitalMatchingAgent:
         state.setdefault("clarification_question", None)
         return state
 
-    def _missing_question(self, missing: List[str], language: str = "English") -> str:
-        # deterministic and short
-        if "destination.city" in missing:
-            return "Which city are you traveling to for treatment?"
-        if "procedure" in missing:
-            return "What procedure are you looking for (e.g., LASIK, knee replacement)?"
-        return "Can you share the missing details so I can match hospitals?"
-
-    def match_node(self, state: HospitalMatchState, config: RunnableConfig) -> HospitalMatchState:
-        constraints = state.get("constraints") or {}
-
+    def _build_prompt_from_constraints(self, constraints: Dict[str, Any]) -> str:
+        """
+        We instruct the LLM to call tools in the right order.
+        City may be missing -> still call search_hospitals_tool with city=None.
+        """
         procedure = (constraints.get("procedure") or "").strip()
         budget = constraints.get("budget") or {}
         budget_max = budget.get("max", None)
-        if isinstance(budget_max, str):
-            try:
-                budget_max = float(budget_max)
-            except Exception:
-                budget_max = None
 
         dest = self._safe_get_destination(constraints)
         country = dest["country"]
         city = dest["city"]
 
-        missing: List[str] = []
-        if not procedure:
-            missing.append("procedure")
-        if not country:
-            missing.append("destination.country")
-        if not city:
-            missing.append("destination.city")
+        return f"""
+You are the Hospital Matching Agent.
 
-        if missing:
-            q = self._missing_question(missing)
-            return {
-                "needs_clarification": True,
-                "clarification_question": q,
-                "messages": [{"role": "assistant", "content": q}],
-            }
+You MUST do:
+1) If procedure or country is missing, ask ONE clarification question and do NOT call tools.
+2) Otherwise call:
+   - search_hospitals_tool(procedure, country, city?)  (city can be null)
+   - then call pick_best_hospitals_tool(hospitals=<search results>, budget_max=<budget_max>)
+3) Finally respond with STRICT JSON only:
+   {{
+     "needs_clarification": false,
+     "clarification_question": null,
+     "hospitals": [... top 5 ...]
+   }}
 
-        # 1) hospital search tool
-        raw = search_hospitals_tool.invoke(
-            {"procedure": procedure, "city": city, "country": country},
-            config=config,
-        )
-        hospitals = (raw or {}).get("results") or []
+Constraints:
+procedure={procedure or None}
+country={country or None}
+city={city or None}
+budget_max={budget_max}
+""".strip()
 
-        # 2) ranking tool
-        ranked = pick_best_hospitals_tool.invoke(
-            {"hospitals": hospitals, "budget_max": budget_max},
-            config=config,
-        )
-        hospitals_ranked = (ranked or {}).get("ranked") or []
+    def llm_node(self, state: HospitalMatchState, config: RunnableConfig) -> HospitalMatchState:
+        constraints = state.get("constraints") or {}
+        prompt = self._build_prompt_from_constraints(constraints)
 
-        payload = {
-            "hospitals": hospitals_ranked,
-            "count": len(hospitals_ranked),
-        }
+        msgs = [
+            SystemMessage(content="You are a tool-using assistant. Follow instructions exactly."),
+            HumanMessage(content=prompt),
+        ]
 
-        return {
-            "hospitals_raw": hospitals,
-            "hospitals_ranked": hospitals_ranked,
+        # ✅ This returns an AIMessage which MAY include tool calls
+        ai_msg = self.llm.invoke(msgs, config=config)
+
+        return {"messages": [ai_msg]}
+
+    def finalize_node(self, state: HospitalMatchState, config: RunnableConfig) -> HospitalMatchState:
+        """
+        After the tool loop ends, the last assistant message should contain final JSON.
+        We parse it into structured outputs for your API.
+        """
+        last = None
+        msgs = state.get("messages") or []
+        for i in range(len(msgs) - 1, -1, -1):
+            m = msgs[i]
+            # AIMessage has .content, but it can be a dict/list too depending on libs.
+            content = getattr(m, "content", None) if hasattr(m, "content") else m.get("content")
+            if content:
+                last = content
+                break
+
+        # Default fallback
+        out = {
             "needs_clarification": False,
             "clarification_question": None,
-            "messages": [{"role": "assistant", "content": json.dumps(payload, ensure_ascii=False)}],
+            "hospitals": [],
         }
+
+        if isinstance(last, str):
+            try:
+                out = json.loads(last)
+            except Exception:
+                # if model didn't follow JSON-only instruction, return raw as clarification
+                out = {
+                    "needs_clarification": True,
+                    "clarification_question": last,
+                    "hospitals": [],
+                }
+
+        state_update: HospitalMatchState = {
+            "needs_clarification": bool(out.get("needs_clarification")),
+            "clarification_question": out.get("clarification_question"),
+            "hospitals_ranked": out.get("hospitals") or [],
+        }
+        return state_update
 
     def _build(self):
         builder = StateGraph(HospitalMatchState)
+
+        tool_node = ToolNode(self.tools)  # ✅ executes @tool calls
+
         builder.add_node("init", self._init_state)
-        builder.add_node("match", self.match_node)
+        builder.add_node("llm", self.llm_node)
+        builder.add_node("tools", tool_node)
+        builder.add_node("finalize", self.finalize_node)
 
         builder.add_edge(START, "init")
-        builder.add_edge("init", "match")
-        builder.add_edge("match", END)
+        builder.add_edge("init", "llm")
+
+        # ✅ Router: if LLM emitted tool calls -> go to tools, else finalize
+        builder.add_conditional_edges("llm", tools_condition, {"tools": "tools", END: "finalize"})
+        # After tools execute, go back to LLM for next step (e.g., ranking)
+        builder.add_edge("tools", "llm")
+
+        builder.add_edge("finalize", END)
 
         return builder.compile(checkpointer=self.checkpointer)
 
     def invoke(self, constraints: Dict[str, Any], thread_id: str) -> Dict[str, Any]:
         state_in: HospitalMatchState = {
             "constraints": constraints or {},
-            "messages": [{"role": "user", "content": "match hospitals"}],
+            "messages": [],  # LLM node will create messages
         }
 
         out: HospitalMatchState = self.graph.invoke(

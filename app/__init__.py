@@ -44,14 +44,15 @@ def create_app():
     app.register_blueprint(main)
 
     # if you need to init your agents:
-    from app.agents.clinical_agent import ClinicalScopeSafetyAgent
+    from app.agents.hospital_matching_agent import HospitalMatchingAgent
     from app.agents.laguage_graph_detector import LanguageGraphDetector
     from app.core.llm import create_llm
 
     llm = create_llm()
     language_agent = LanguageGraphDetector(llm=llm)
-    clinical_agent = ClinicalScopeSafetyAgent(llm=llm)
+    hospital_matching_agent =HospitalMatchingAgent(llm=llm)
+    
 
-    init_routes(language_agent, clinical_agent)
+    init_routes(language_agent, hospital_matching_agent)
 
     return app

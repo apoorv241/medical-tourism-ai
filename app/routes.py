@@ -1,22 +1,24 @@
 from sqlalchemy.exc import IntegrityError
-from flask import Blueprint, render_template, request, jsonify,redirect, url_for, flash
+from flask import Blueprint, render_template, request, jsonify,redirect, url_for, flash,session
+from flask_login import login_user, logout_user, login_required, current_user
 import uuid
 
 from flask_login import LoginManager
 from app.models import User
 from app.extensions import db
 
-from flask_login import login_user, logout_user, login_required 
 
 main = Blueprint("main", __name__)
 
 
 language_agent = None
-clinical_agent = None
+hospital_agent = None
 
-def init_routes(lang_agent, clinic_agent):
+def init_routes(lang_agent, hosp_agent):
     global language_agent
+    global hospital_agent
     language_agent = lang_agent
+    hospital_agent = hosp_agent
     
 
 @main.get("/health")
@@ -84,7 +86,8 @@ def login():
 
     user = User.query.filter_by(email=email).first()
     if not user or not user.check_password(password):
-        return jsonify({"error": "invalid credentials"}), 401
+        flash("Invalid email or password.", "danger")
+        return redirect(url_for("main.home"))
 
     login_user(user)
     return redirect(url_for("main.planner"))  # <-- planner page endpoint
@@ -108,22 +111,33 @@ def planner():
 def plan():
     try:
         data = request.get_json(force=True, silent=True) or {}
-
         query = (data.get("query") or "").strip()
         if not query:
             return jsonify({"error": "Missing 'query' parameter"}), 400
 
-        if language_agent is None:
-            return jsonify({"error": "Agents not initialized"}), 500
+        # Create a stable per-login thread id (stored in signed cookie session)
+        if "thread_id" not in session:
+            session["thread_id"] = f"user:{current_user.get_id()}:{uuid.uuid4().hex}"
 
-        base_thread_id = "dev-thread"
+        base_thread_id = session["thread_id"]
+
         lang_thread_id = f"{base_thread_id}:lang"
+        hosp_thread_id = f"{base_thread_id}:hospital"
+
         language_result = language_agent.invoke(query, lang_thread_id)
-        
+
         if language_result.get("needs_clarification"):
-            return jsonify(language_result)
+            return jsonify(language_result), 200
 
         constraints = language_result.get("constraints") or {}
+
+        hospital_result = hospital_agent.invoke(constraints, hosp_thread_id)
+
+        return jsonify({
+            "thread_id": base_thread_id,
+            "language_result": language_result,
+            "hospital_result": hospital_result,
+        }), 200
 
        
         
