@@ -1,3 +1,5 @@
+from datetime import datetime
+from time import time
 from sqlalchemy.exc import IntegrityError
 from flask import Blueprint, render_template, request, jsonify,redirect, url_for, flash,session
 from flask_login import login_user, logout_user, login_required, current_user
@@ -27,11 +29,15 @@ def health():
 
 @main.get("/")
 def home():
+    if current_user.is_authenticated:
+            return redirect(url_for("main.planner"))
     return render_template("home.html")
 
 @main.route("/register", methods=["GET", "POST"])
 def register():
     if request.method == "GET":
+        if current_user.is_authenticated:
+            return redirect(url_for("main.planner"))
         return render_template("register.html")
 
     try:
@@ -97,7 +103,7 @@ def login():
 @login_required
 def logout():
     logout_user()
-    return jsonify({"message": "logged out"}), 200
+    return redirect(url_for("main.home"))
 
 
 
@@ -105,6 +111,8 @@ def logout():
 @main.get("/planner")
 @login_required
 def planner():
+    session["thread_id"] = f"user:{current_user.get_id()}:{uuid.uuid4().hex}"
+    session.pop("plan_state", None)  # optional: reset constraints on refresh
     return render_template("planner.html")
 
 @main.post("/api/plan")
@@ -115,32 +123,184 @@ def plan():
         if not query:
             return jsonify({"error": "Missing 'query' parameter"}), 400
 
-        # Create a stable per-login thread id (stored in signed cookie session)
+        
         if "thread_id" not in session:
             session["thread_id"] = f"user:{current_user.get_id()}:{uuid.uuid4().hex}"
-
         base_thread_id = session["thread_id"]
-
         lang_thread_id = f"{base_thread_id}:lang"
         hosp_thread_id = f"{base_thread_id}:hospital"
 
+        # -----------------------------
+        # Session state (your memory)
+        # -----------------------------
+        state = session.get("plan_state", {})
+        constraints = state.get("constraints") or {}
+        needs_clarification = bool(state.get("needs_clarification"))
+        missing_fields = state.get("missing_fields") or []
+        destination_supported = state.get("destination_supported", None)
+
+        # -----------------------------
+        # Helpers
+        # -----------------------------
+        
+        
+        def adapt_constraints_for_hospital(constraints: dict) -> dict:
+            c = dict(constraints or {})
+
+            # Ensure destination is a dict
+            dest = c.get("destination") or {}
+            if not isinstance(dest, dict):
+                dest = {}
+
+            country = (
+                dest.get("country")
+                or c.get("country")
+                or c.get("destination_country")
+            )
+
+            # Language agent often outputs preferred_countries
+            if not country:
+                preferred = c.get("preferred_countries") or []
+                if isinstance(preferred, list) and preferred:
+                    country = str(preferred[0]).strip() or None
+
+            dest["country"] = country
+            dest.setdefault("city", None)
+
+            c["destination"] = dest
+            return c
+            c = dict(constraints or {})
+
+            dest = c.get("destination") or {}
+            if not isinstance(dest, dict):
+                dest = {}
+
+            # Map language-agent output -> hospital-agent expected schema
+            if not dest.get("country"):
+                preferred = c.get("preferred_countries") or []
+                if isinstance(preferred, list) and preferred:
+                    dest["country"] = str(preferred[0]).strip() or None
+
+            dest.setdefault("city", None)
+            c["destination"] = dest
+            return c
+
+        def merge_constraints(old: dict, new: dict) -> dict:
+            merged = dict(old or {})
+            for k, v in (new or {}).items():
+                if v is None:
+                    continue
+                if isinstance(v, str) and not v.strip():
+                    continue
+                merged[k] = v
+            return merged
+
+        def constraints_complete() -> bool:
+            if missing_fields:
+                return False
+
+            c2 = adapt_constraints_for_hospital(constraints)
+            dest = c2.get("destination") or {}
+
+            has_destination = bool(isinstance(dest, dict) and dest.get("country"))
+            has_procedure = bool(c2.get("procedure"))
+
+            return has_destination and has_procedure and (destination_supported is not False)
+            # Best signal: language agent already told us nothing is missing
+            if missing_fields:
+                return False
+            # If you want extra safety, enforce a few keys you consider mandatory:
+            required_any = ["procedure", "destination", "country", "destination_country"]
+            has_destination = any(constraints.get(k) for k in required_any)
+            # budget / origin may be optional in your app; enforce if you want:
+            # has_budget = bool(constraints.get("max_budget") or constraints.get("budget"))
+            # has_origin = bool(constraints.get("origin_city") or constraints.get("from_city"))
+            return has_destination and (destination_supported is not False)
+
+        def looks_like_new_request(user_text: str) -> bool:
+            t = user_text.lower()
+            # If the user is clearly changing constraints / new procedure / new place → re-run language
+            triggers = [
+                "in ", "to ", "from ", "budget", "usd", "$", "max", "under",
+                "lasik", "knee", "hair", "ivf", "dental", "surgery", "procedure",
+                "change", "instead", "different", "compare", "another"
+            ]
+            return any(x in t for x in triggers)
+
+        # -----------------------------
+        # Routing logic
+        # -----------------------------
+
+        # 1) If we're in a clarification step, ONLY call language agent
+        if needs_clarification:
+            language_result = language_agent.invoke(query, lang_thread_id)
+
+            constraints = merge_constraints(constraints, language_result.get("constraints") or {})
+            state.update({
+                "constraints": constraints,
+                "needs_clarification": bool(language_result.get("needs_clarification")),
+                "missing_fields": language_result.get("missing_fields") or [],
+                "clarification_question": language_result.get("clarification_question"),
+                
+            })
+            
+            if "destination_supported" in language_result:
+                state["destination_supported"] = language_result["destination_supported"]
+            
+            
+            
+            session["plan_state"] = state
+
+            if state["needs_clarification"]:
+                return jsonify(language_result), 200
+
+            # clarification done → now go hospital
+            hosp_constraints = adapt_constraints_for_hospital(constraints)
+            hospital_result = hospital_agent.invoke(hosp_constraints, hosp_thread_id)
+            return jsonify({
+                "needs_clarification": False,
+                "clarification_question": None,
+                "hospitals": hospital_result.get("hospitals") or hospital_result.get("results") or [],
+            }), 200
+
+        # 2) If we already have complete constraints AND user isn't changing them → go hospital directly
+        if constraints_complete() and not looks_like_new_request(query):
+            hosp_constraints = adapt_constraints_for_hospital(constraints)
+            hospital_result = hospital_agent.invoke(hosp_constraints, hosp_thread_id)
+            return jsonify({
+                "needs_clarification": False,
+                "clarification_question": None,
+                "hospitals": hospital_result.get("hospitals") or hospital_result.get("results") or [],
+            }), 200
+
+        # 3) Otherwise, call language agent (new request OR updating constraints)
         language_result = language_agent.invoke(query, lang_thread_id)
 
-        if language_result.get("needs_clarification"):
+        constraints = merge_constraints(constraints, language_result.get("constraints") or {})
+        state.update({
+            "constraints": constraints,
+            "needs_clarification": bool(language_result.get("needs_clarification")),
+            "missing_fields": language_result.get("missing_fields") or [],
+            "clarification_question": language_result.get("clarification_question"),
+        })
+
+        # Only update destination_supported if explicitly returned
+        if "destination_supported" in language_result:
+            state["destination_supported"] = language_result["destination_supported"]
+        session["plan_state"] = state
+
+        if state["needs_clarification"]:
             return jsonify(language_result), 200
 
-        constraints = language_result.get("constraints") or {}
-
-        hospital_result = hospital_agent.invoke(constraints, hosp_thread_id)
-
+        hosp_constraints = adapt_constraints_for_hospital(constraints)
+        hospital_result = hospital_agent.invoke(hosp_constraints, hosp_thread_id)
         return jsonify({
-            "thread_id": base_thread_id,
-            "language_result": language_result,
-            "hospital_result": hospital_result,
+            "needs_clarification": False,
+            "clarification_question": None,
+            "hospitals": hospital_result.get("hospitals") or hospital_result.get("results") or [],
         }), 200
 
-       
-        
     except Exception as e:
         print("Error in /api/plan endpoint:", e)
         return jsonify({"error": str(e)}), 500
+    

@@ -13,7 +13,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 
 from app.tools.hospital_tools import search_hospitals_tool, pick_best_hospitals_tool
-
+import sys
+import re
+from langchain_core.messages import AIMessage, ToolMessage
 
 class HospitalMatchState(TypedDict, total=False):
     messages: Annotated[list, add_messages]
@@ -38,6 +40,33 @@ class HospitalMatchingAgent:
         self.llm = llm.bind_tools(self.tools) 
         self.checkpointer = MemorySaver()
         self.graph = self._build()
+        
+    def _extract_json_from_text(self, text: str) -> Dict[str, Any]:
+        """
+        Handles:
+        - plain JSON: {...}
+        - fenced JSON: ```json {...} ```
+        - extra text around JSON (best effort)
+        """
+        if not text:
+            return {}
+
+        s = text.strip()
+
+        # If fenced: ```json ... ```
+        if s.startswith("```"):
+            m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", s, flags=re.DOTALL | re.IGNORECASE)
+            if m:
+                s = m.group(1).strip()
+
+        # If extra junk, grab first {...}
+        if not s.startswith("{"):
+            start = s.find("{")
+            end = s.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                s = s[start : end + 1]
+
+        return json.loads(s)
 
     def _safe_get_destination(self, constraints: Dict[str, Any]) -> Dict[str, Optional[str]]:
         dest = constraints.get("destination") or {}
@@ -73,21 +102,35 @@ You are the Hospital Matching Agent.
 You MUST do:
 1) If procedure or country is missing, ask ONE clarification question and do NOT call tools.
 2) Otherwise call:
-   - search_hospitals_tool(procedure, country, city?)  (city can be null)
+   - search_hospitals_tool(procedure, country, city?)
    - then call pick_best_hospitals_tool(hospitals=<search results>, budget_max=<budget_max>)
-3) Finally respond with STRICT JSON only:
-   {{
-     "needs_clarification": false,
-     "clarification_question": null,
-     "hospitals": [... top 5 ...]
-   }}
+
+3) Finally respond with STRICT JSON only.
+
+IMPORTANT:
+- Each hospital MUST contain the REAL hospital name.
+- DO NOT generate descriptive titles like "Best Lasik Hospital in Turkey".
+- Use realistic hospital names.
+- Output format MUST be:
+
+{{
+  "needs_clarification": false,
+  "clarification_question": null,
+  "hospitals": [
+    {{
+      "name": "Real Hospital Name",
+      "rating": 4.5,
+      "price": 1800
+    }}
+  ]
+}}
 
 Constraints:
 procedure={procedure or None}
 country={country or None}
 city={city or None}
 budget_max={budget_max}
-""".strip()
+"""
 
     def llm_node(self, state: HospitalMatchState, config: RunnableConfig) -> HospitalMatchState:
         constraints = state.get("constraints") or {}
@@ -105,44 +148,61 @@ budget_max={budget_max}
 
     def finalize_node(self, state: HospitalMatchState, config: RunnableConfig) -> HospitalMatchState:
         """
-        After the tool loop ends, the last assistant message should contain final JSON.
-        We parse it into structured outputs for your API.
+        After tool loop ends, parse the final assistant JSON and write it into state.
+        IMPORTANT: The last message might be:
+        - AIMessage with ```json fenced block
+        - ToolMessage content
+        - Multiple messages (tool traces + final)
+        We search backwards for the most recent AIMessage content that contains '{'.
         """
-        last = None
         msgs = state.get("messages") or []
-        for i in range(len(msgs) - 1, -1, -1):
-            m = msgs[i]
-            # AIMessage has .content, but it can be a dict/list too depending on libs.
-            content = getattr(m, "content", None) if hasattr(m, "content") else m.get("content")
-            if content:
-                last = content
-                break
+
+        last_text: Optional[str] = None
+
+        # Walk backward to find a likely final JSON answer
+        for m in reversed(msgs):
+            if isinstance(m, AIMessage):
+                if isinstance(m.content, str) and "{" in m.content:
+                    last_text = m.content
+                    break
+            elif isinstance(m, ToolMessage):
+                # tool outputs can be JSON strings too, but we prefer final AIMessage
+                continue
+            elif isinstance(m, dict):
+                c = m.get("content")
+                if isinstance(c, str) and "{" in c:
+                    last_text = c
+                    break
 
         # Default fallback
-        out = {
+        out_obj = {
             "needs_clarification": False,
             "clarification_question": None,
             "hospitals": [],
         }
 
-        if isinstance(last, str):
+        if last_text:
             try:
-                out = json.loads(last)
+                out_obj = self._extract_json_from_text(last_text)
             except Exception:
-                # if model didn't follow JSON-only instruction, return raw as clarification
-                out = {
+                # If model didn't return parseable JSON, treat it as clarification text
+                out_obj = {
                     "needs_clarification": True,
-                    "clarification_question": last,
+                    "clarification_question": last_text,
                     "hospitals": [],
                 }
+        else:
+            out_obj = {
+                "needs_clarification": True,
+                "clarification_question": "No final response found from hospital agent.",
+                "hospitals": [],
+            }
 
-        state_update: HospitalMatchState = {
-            "needs_clarification": bool(out.get("needs_clarification")),
-            "clarification_question": out.get("clarification_question"),
-            "hospitals_ranked": out.get("hospitals") or [],
+        return {
+            "needs_clarification": bool(out_obj.get("needs_clarification")),
+            "clarification_question": out_obj.get("clarification_question"),
+            "hospitals_ranked": out_obj.get("hospitals") or [],
         }
-        return state_update
-
     def _build(self):
         builder = StateGraph(HospitalMatchState)
 
@@ -156,9 +216,7 @@ budget_max={budget_max}
         builder.add_edge(START, "init")
         builder.add_edge("init", "llm")
 
-        # ✅ Router: if LLM emitted tool calls -> go to tools, else finalize
         builder.add_conditional_edges("llm", tools_condition, {"tools": "tools", END: "finalize"})
-        # After tools execute, go back to LLM for next step (e.g., ranking)
         builder.add_edge("tools", "llm")
 
         builder.add_edge("finalize", END)
@@ -175,6 +233,10 @@ budget_max={budget_max}
             state_in,
             config={"configurable": {"thread_id": thread_id}},
         )
+        
+        print("========", file=sys.stderr, flush=True)
+        print(out, file=sys.stderr, flush=True)
+        print("========", file=sys.stderr, flush=True)
 
         return {
             "needs_clarification": bool(out.get("needs_clarification")),

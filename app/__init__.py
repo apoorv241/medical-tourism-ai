@@ -23,7 +23,6 @@ def create_app():
     )
     app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
-    # ✅ init extensions FIRST
     db.init_app(app)
     login_manager.init_app(app)
     
@@ -32,18 +31,15 @@ def create_app():
         flash("Please login.", "warning")
         return redirect(url_for("main.home"))
 
-    # ✅ import models AFTER db init to avoid circular import
     from .models import User
 
     @login_manager.user_loader
     def load_user(user_id: str):
         return db.session.get(User, int(user_id))
 
-    # ✅ import routes/blueprints AFTER extensions are ready
     from .routes import main, init_routes
     app.register_blueprint(main)
 
-    # if you need to init your agents:
     from app.agents.hospital_matching_agent import HospitalMatchingAgent
     from app.agents.laguage_graph_detector import LanguageGraphDetector
     from app.core.llm import create_llm

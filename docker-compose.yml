@@ -26,6 +26,27 @@ services:
       interval: 3s
       timeout: 3s
       retries: 30
+  
+  mongo:
+    image: mongo:7.0
+    container_name: medical_mongo
+    restart: always
+    ports:
+      - "27017:27017"
+    env_file:
+      - ./.env
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+      MONGO_INITDB_DATABASE: ${MONGO_DATABASE}
+    volumes:
+      - mongo_data:/data/db
+    #healthcheck:
+    #  test: echo 'db.runCommand("ping").ok' | mongosh localhost:27017/test --quiet
+    #  interval: 5s
+     # timeout: 5s
+   #   retries: 10
 
 volumes:
   mysql_data:
+  mongo_data:

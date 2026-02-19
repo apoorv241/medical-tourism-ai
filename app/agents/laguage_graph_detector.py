@@ -12,7 +12,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langchain_core.messages import BaseMessage, AIMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import tool
-
+import sys
 
 SUPPORTED_SET = {
     "thailand",
@@ -599,7 +599,10 @@ class LanguageGraphDetector:
             state_in,
             config={"configurable": {"thread_id": thread_id}},
         )
-
+        
+      #  print("========", file=sys.stderr, flush=True)
+    #    print(out, file=sys.stderr, flush=True)
+      #  print("========", file=sys.stderr, flush=True)
         return {
             "language": out.get("language"),
             "translation": out.get("translation"),
